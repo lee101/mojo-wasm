@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mojo-wasm playground</title>
+<style>
+  :root { color-scheme: dark; --bg:#0f1115; --fg:#e6e6e6; --mut:#8b93a7; --acc:#ff5f1f; --pan:#171a21; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 ui-sans-serif,system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+  header { padding:12px 16px; border-bottom:1px solid #262b36; display:flex; gap:12px; align-items:center; }
+  h1 { font-size:15px; margin:0; font-weight:600; }
+  header .mut { color:var(--mut); font-size:12px; }
+  button { background:var(--acc); color:#0f1115; border:0; padding:7px 14px; border-radius:6px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  select { background:var(--pan); color:var(--fg); border:1px solid #262b36; border-radius:6px; padding:6px; }
+  main { display:grid; grid-template-columns:1fr 1fr; gap:1px; background:#262b36; height:calc(100vh - 53px); }
+  @media (max-width:800px){ main { grid-template-columns:1fr; height:auto; } }
+  textarea, pre { margin:0; background:var(--pan); color:var(--fg); border:0; padding:14px;
+    font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; overflow:auto; }
+  textarea { resize:none; outline:none; }
+  .right { display:flex; flex-direction:column; min-height:60vh; }
+  pre { flex:1; white-space:pre-wrap; }
+  canvas { background:#000; width:100%; display:block; }
+  .err { color:#ff6b6b; }
+</style>
+</head>
+<body>
+<header>
+  <h1>mojo-wasm</h1>
+  <span class="mut">Mojo &rarr; LLVM IR &rarr; wasm32, run in this tab</span>
+  <select id="sample"></select>
+  <button id="run">Compile &amp; run</button>
+  <span class="mut" id="status"></span>
+</header>
+<main>
+  <textarea id="src" spellcheck="false"></textarea>
+  <div class="right">
+    <pre id="out">ready</pre>
+    <canvas id="cv" width="480" height="320"></canvas>
+  </div>
+</main>
+<script type="module">
+import { loadMojo } from "../js/mojowasm.js";
+
+const SAMPLES = {
+  "sum + SIMD": `comptime Ptr = UnsafePointer[Float64, AnyOrigin[mut=True]]
+comptime W = 4
+
+@export("sum")
+def sum(addr: Int32, n: Int32) abi("C") -> Float64:
+    var p = Ptr(unsafe_from_address=Int(addr))
+    var count = Int(n)
+    var acc = SIMD[DType.float64, W](0)
+    var i = 0
+    while i + W <= count:
+        acc += p.load[width=W](i)
+        i += W
+    var s = acc.reduce_add()
+    while i < count:
+        s += p[i]
+        i += 1
+    return s
+`,
+  "mandelbrot (draws)": `@export("mandelbrot")
+def mandelbrot(addr: Int32, w: Int32, h: Int32, max_iter: Int32,
+               cx: Float64, cy: Float64, scale: Float64) abi("C") -> Int32:
+    comptime Ptr = UnsafePointer[UInt8, AnyOrigin[mut=True]]
+    var p = Ptr(unsafe_from_address=Int(addr))
+    var width = Int(w)
+    var height = Int(h)
+    var iters = Int(max_iter)
+    var total = 0
+    for y in range(height):
+        var im = cy + (Float64(y) - Float64(height) / 2.0) * scale
+        for x in range(width):
+            var re = cx + (Float64(x) - Float64(width) / 2.0) * scale
+            var zr = Float64(0)
+            var zi = Float64(0)
+            var i = 0
+            while i < iters:
+                var zr2 = zr * zr
+                var zi2 = zi * zi
+                if zr2 + zi2 > 4.0:
+                    break
+                zi = 2.0 * zr * zi + im
+                zr = zr2 - zi2 + re
+                i += 1
+            total += i
+            p[y * width + x] = UInt8((i * 255) // iters)
+    return Int32(total)
+`,
+  "heap (List)": `@export("heap_sum")
+def heap_sum(n: Int32) abi("C") -> Float64:
+    var l = List[Float64]()
+    for i in range(Int(n)):
+        l.append(Float64(i) * 0.5)
+    var s = Float64(0)
+    for i in range(len(l)):
+        s += l[i]
+    return s
+`,
+};
+
+const $ = (id) => document.getElementById(id);
+const sel = $("sample"), src = $("src"), out = $("out"), st = $("status"), cv = $("cv");
+for (const k of Object.keys(SAMPLES)) sel.add(new Option(k, k));
+sel.onchange = () => { src.value = SAMPLES[sel.value]; };
+src.value = SAMPLES[sel.value];
+
+const log = (s, cls) => { out.textContent += "\n" + s; if (cls) out.className = cls; };
+
+$("run").onclick = async () => {
+  $("run").disabled = true;
+  out.className = ""; out.textContent = "compiling..."; st.textContent = "";
+  const t0 = performance.now();
+  const res = await fetch("/compile", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ source: src.value }),
+  });
+  if (!res.ok) { out.className = "err"; out.textContent = await res.text(); $("run").disabled = false; return; }
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  st.textContent = `${bytes.length} B in ${(performance.now() - t0) | 0} ms` +
+    (res.headers.get("X-Mojowasm-Cached") === "1" ? " (cached)" : "");
+  out.textContent = "loaded, exports: ";
+  const m = await loadMojo(bytes, { onPrint: (s) => { out.textContent += s; } });
+  const names = Object.keys(m.exports).filter((k) => typeof m.exports[k] === "function" && !k.startsWith("__") && !k.startsWith("mw_"));
+  out.textContent += names.join(", ");
+
+  if (m.exports.mandelbrot) {
+    const w = cv.width, h = cv.height;
+    const buf = m.allocU8(w * h);
+    const t = performance.now();
+    m.exports.mandelbrot(buf.ptr, w, h, 300, -0.6, 0, 3.0 / w);
+    const ms = performance.now() - t;
+    const img = new ImageData(w, h);
+    const g = buf.view;
+    for (let i = 0; i < w * h; i++) {
+      const v = g[i];
+      img.data[i * 4] = v; img.data[i * 4 + 1] = (v * 2) & 255; img.data[i * 4 + 2] = 255 - v; img.data[i * 4 + 3] = 255;
+    }
+    cv.getContext("2d").putImageData(img, 0, 0);
+    log(`\nmandelbrot ${w}x${h} @300 iters: ${ms.toFixed(1)} ms`);
+  } else if (m.exports.sum) {
+    const n = 1 << 20;
+    const b = m.allocF64(n);
+    const v = b.view; for (let i = 0; i < n; i++) v[i] = i * 0.5;
+    const t = performance.now(); const s = m.exports.sum(b.ptr, n); const ms = performance.now() - t;
+    log(`\nsum(2^20) = ${s} in ${ms.toFixed(2)} ms`);
+  } else if (m.exports.heap_sum) {
+    const t = performance.now(); const s = m.exports.heap_sum(100000); const ms = performance.now() - t;
+    log(`\nheap_sum(1e5) = ${s} in ${ms.toFixed(2)} ms, heap ${m.heapUsed()} B`);
+  }
+  $("run").disabled = false;
+};
+</script>
+</body>
+</html>

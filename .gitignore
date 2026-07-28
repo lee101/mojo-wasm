@@ -1,0 +1,8 @@
+.pixi/
+build/
+probe/
+__pycache__/
+*.wasm
+*.o
+*.ll
+.pytest_cache/

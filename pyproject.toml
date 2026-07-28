@@ -1,0 +1,21 @@
+[project]
+name = "mojowasm"
+version = "0.1.0"
+description = "Compile Mojo to WebAssembly and run it in the browser"
+authors = [{ name = "Lee Penkman", email = "leepenkman@gmail.com" }]
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+
+[project.scripts]
+mojowasm = "mojowasm.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "python" }
+packages = ["mojowasm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
